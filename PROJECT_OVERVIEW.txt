@@ -1,0 +1,202 @@
+SIMPLE-INVOICE - PROJECT OVERVIEW
+=================================
+
+1. PROBLEM STATEMENT (TARGET)
+----------------------------
+Build a secure full-stack invoicing web app ("SimpleInvoice") where a logged-in user can list,
+search, filter, sort and paginate invoices, view an invoice's full details, and create new invoices,
+with all totals calculated by a NestJS + PostgreSQL backend and the whole stack runnable with one
+`docker compose up` command.
+
+
+2. TECH STACK
+-------------
+Frontend
+  - React 19 + TypeScript, built with Vite
+  - Mantine UI (components, date pickers, notifications)
+  - React Router (routing + protected routes)
+  - TanStack Query (server data fetching / caching)
+  - react-hook-form + Zod (forms and client-side validation)
+  - Axios (HTTP client with JWT interceptor)
+  - Vitest + Testing Library (tests)
+
+Backend
+  - NestJS + TypeScript (REST API)
+  - TypeORM (ORM + migrations)
+  - Passport JWT + bcryptjs (authentication)
+  - class-validator / class-transformer (input validation)
+  - @nestjs/swagger (API docs at /api/docs)
+  - decimal.js (exact money calculations)
+  - helmet, CORS allow-list, @nestjs/throttler (hardening)
+  - Joi (environment variable validation)
+  - Vitest + Supertest (unit and e2e tests)
+
+DevOps
+  - Docker + Docker Compose (postgres, backend, frontend)
+  - nginx (serves the built React app and proxies /api to the backend)
+
+
+3. DATABASE
+-----------
+PostgreSQL
+  - Local development: Supabase-hosted PostgreSQL (DB_SSL=true)
+  - Docker: postgres:17-alpine container
+
+Tables
+  users          id (uuid PK), email (unique), password_hash (bcrypt), fullname, created_at
+  invoices       invoice_id (uuid PK), invoice_number (UNIQUE), invoice_reference, invoice_date,
+                 due_date (CHECK >= invoice_date), currency, currency_symbol, description,
+                 status (Draft | Pending | Paid), customer_fullname, customer_email,
+                 customer_mobile, customer_address, tax_rate, invoice_sub_total, total_tax,
+                 total_discount, total_amount, total_paid, balance_amount, created_at,
+                 created_by (FK -> users)
+  invoice_items  id (uuid PK), invoice_id (FK -> invoices, ON DELETE CASCADE), name,
+                 quantity (> 0), rate (> 0)
+
+Notes
+  - Money columns are numeric(12,2).
+  - Customer details are embedded in the invoices table.
+  - "Overdue" is NOT stored; it is derived at read time:
+      status != Paid AND dueDate < today  ->  Overdue
+  - Indexes on invoice_date, due_date, total_amount, (status, due_date), plus pg_trgm GIN
+    indexes on invoice_number and customer_fullname for fast partial search.
+  - Seed script (npm run seed): runs migrations, creates the reviewer account and inserts the
+    Appendix A invoice + 40 generated invoices.
+
+
+4. USER WORKFLOW
+----------------
+  1. User opens the app -> not logged in -> redirected to the Login page.
+  2. User enters email + password (validated on the client and the server).
+  3. Backend returns a JWT -> stored in the browser -> user lands on the Invoice List (home).
+  4. Invoice List: search by invoice number / customer name, filter by status
+     (Draft / Pending / Paid / Overdue) and invoice date range, sort by invoice date /
+     due date / total amount, change page and page size. Filters are kept in the URL.
+  5. User clicks an invoice -> Invoice Detail page: invoice info, customer info, line item,
+     subtotal, tax, discount, total, paid and outstanding balance, status. Can print it.
+  6. User clicks "New invoice" -> fills the form (customer, invoice number, dates, currency,
+     one line item, tax %, discount) -> submits.
+  7. Backend validates, calculates totals, saves the invoice as Draft -> success notification ->
+     user is redirected back to the Invoice List.
+  8. User signs out from the account menu, or is signed out automatically when the token expires
+     (any 401 response also ends the session).
+
+  Default login:  admin@simpleinvoice.dev / Admin@123
+
+
+5. FRONTEND DIRECTORY WORKFLOW  (frontend/src)
+----------------------------------------------
+  main.tsx             App entry point; loads styles and renders <App />
+  App.tsx              Creates the browser router and wraps it with AppProviders
+  AppProviders.tsx     Mantine theme, notifications, React Query client, AuthProvider
+  routes.tsx           Route table: /login (public); /invoices, /invoices/new,
+                       /invoices/:id (protected by RequireAuth, inside AppLayout)
+  query-client.ts      React Query defaults (caching, retry rules)
+  theme.ts             Mantine theme (brand colours, fonts)
+
+  api/                 Talks to the backend
+    client.ts          Axios instance, adds "Authorization: Bearer <token>", turns errors into
+                       ApiError, logs out on 401
+    auth.ts            login(), fetchProfile()
+    invoices.ts        fetchInvoices(), fetchInvoice(), createInvoice()
+
+  auth/                Session handling
+    session-storage.ts Saves/reads the token + expiry in localStorage
+    AuthProvider.tsx   login / logout state, auto-logout on token expiry
+    auth-context.ts    useAuth() hook
+    RequireAuth.tsx    Route guard -> redirects to /login when not signed in
+
+  layouts/AppLayout.tsx     Header (brand + account menu) around protected pages
+  pages/                    One file per screen
+    LoginPage.tsx           Login form
+    InvoiceListPage.tsx     Filters + table/cards + pagination
+    InvoiceDetailPage.tsx   Full invoice view
+    CreateInvoicePage.tsx   Create invoice form
+    NotFoundPage.tsx        Unknown routes
+  features/invoices/        Invoice-specific building blocks
+    useInvoiceListParams.ts List state (page, sort, filters) read from / written to the URL
+    InvoiceFilters.tsx      Search box, date range, sort, status filter
+    InvoiceTable.tsx        Desktop table and mobile cards
+    queries.ts              React Query hooks: useInvoiceList, useInvoice, useCreateInvoice
+    invoice-form.ts         Zod schema for the create form + mapping to the API payload
+  components/               Shared UI (StatusBadge, BrandMark)
+  utils/                    Money/date formatting, currency list
+  types/api.ts              TypeScript types matching the API responses
+  test/                     Test setup, render helper, fixtures
+
+  Flow:  Page -> feature hook (React Query) -> api/*.ts -> Axios client -> /api/... -> backend
+
+
+6. BACKEND DIRECTORY WORKFLOW  (backend/src)
+--------------------------------------------
+  main.ts              Starts the Nest app, applies setup, listens on PORT (3000)
+  app.setup.ts         helmet, CORS, global ValidationPipe, global exception filter, Swagger
+  app.module.ts        Wires config, TypeORM (runs migrations on boot), throttler, modules
+  app.controller.ts    GET /health (liveness + DB check)
+  config/              env.validation.ts - validates .env values at startup (Joi)
+
+  auth/                Authentication
+    auth.controller.ts POST /auth/login, GET /auth/me
+    auth.service.ts    Checks email + bcrypt password, signs the JWT
+    jwt.strategy.ts    Verifies the token on each request
+    jwt-auth.guard.ts  Global guard - every route is protected unless marked @Public()
+    dto/               Login request / response shapes
+
+  users/               User entity + lookup service
+  invoices/            Invoice feature
+    invoices.controller.ts  GET /invoices, GET /invoices/:id, POST /invoices
+    invoices.service.ts     Query building (search, filter, sort, paging), create, 409 on duplicate
+    invoice-calculator.ts   subTotal, tax, discount, total, balance (decimal.js)
+    invoice-status.ts       Overdue derivation
+    invoice.mapper.ts       Entity -> API response
+    currencies.ts           Supported currencies + symbols
+    entities/               Invoice, InvoiceItem (TypeORM)
+    dto/                    Create invoice, list query, response DTOs (validation + Swagger)
+  common/              Global exception filter, custom validators (ISO date, on-or-after), utils
+  database/            TypeORM config, data source, migrations/, seed/ (seed script + data)
+  test/ (outside src)  End-to-end test: login -> create -> list -> detail -> 409 -> 400 -> 404
+
+  Flow:  HTTP request -> JWT guard -> ValidationPipe (DTO) -> Controller -> Service
+         -> TypeORM -> PostgreSQL -> Mapper -> JSON response
+         (any error -> global exception filter -> { statusCode, message, error })
+
+
+7. API WORKFLOW
+---------------
+Base URL: http://localhost:3000   (via the frontend: /api/...)
+Swagger:  http://localhost:3000/api/docs
+
+  Method  Endpoint         Auth  Purpose
+  ------  ---------------  ----  -------------------------------------------------------------
+  POST    /auth/login      No    Email + password -> { accessToken, tokenType, expiresIn, user }
+  GET     /auth/me         Yes   Current user profile
+  GET     /invoices        Yes   List invoices
+  GET     /invoices/:id    Yes   Invoice detail with customer, items and totals
+  POST    /invoices        Yes   Create invoice (always Draft, totals calculated by the server)
+  GET     /health          No    Health check
+
+GET /invoices query parameters
+  page, pageSize (max 100), sortBy (invoiceDate | dueDate | totalAmount), ordering (ASC | DESC),
+  status (Draft | Pending | Paid | Overdue), keyword (partial, case-insensitive on invoice number
+  or customer name), fromDate, toDate (YYYY-MM-DD)
+
+  Response: { "data": [...], "paging": { "page": 1, "pageSize": 10, "total": 41 } }
+
+POST /invoices calculation (server side)
+  subTotal      = quantity x rate
+  taxAmount     = subTotal x (tax% / 100)          (tax defaults to 10%)
+  totalAmount   = subTotal + taxAmount - discount  (discount defaults to 0)
+  balanceAmount = totalAmount - totalPaid
+
+Request lifecycle
+  1. Client calls POST /auth/login -> receives JWT.
+  2. Client sends "Authorization: Bearer <JWT>" on every /invoices request.
+  3. Guard verifies the token (401 if missing/invalid/expired).
+  4. ValidationPipe checks the input (400 with a list of messages if invalid).
+  5. Service runs the business logic and database query.
+  6. Response is returned as JSON.
+
+Error format (all errors)
+  { "statusCode": 400, "message": ["dueDate must be on or after invoiceDate"], "error": "Bad Request" }
+  { "statusCode": 404, "message": "Invoice not found", "error": "Not Found" }
+  { "statusCode": 409, "message": "Invoice number \"INV-1\" already exists", "error": "Conflict" }
